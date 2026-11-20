@@ -1,0 +1,83 @@
+# Electron rules (no registry pack exists). Tags -> checklist.py, text -> kb.py.
+rules:
+  - id: electron-unsafe-webprefs
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: A BrowserWindow turns off an Electron safety switch (nodeIntegration on, contextIsolation/webSecurity/sandbox off, or insecure content allowed).
+    metadata: {tag: electron-prefs, cwe: "CWE-1188", fix: "webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } and expose only named functions from preload.js with contextBridge."}
+    pattern-either:
+      - pattern: |
+          {..., nodeIntegration: true, ...}
+      - pattern: |
+          {..., contextIsolation: false, ...}
+      - pattern: |
+          {..., webSecurity: false, ...}
+      - pattern: |
+          {..., allowRunningInsecureContent: true, ...}
+      - pattern: |
+          {..., enableRemoteModule: true, ...}
+      - pattern: |
+          {..., nodeIntegrationInSubFrames: true, ...}
+      - pattern: |
+          {..., nodeIntegrationInWorker: true, ...}
+      - pattern: |
+          {..., sandbox: false, ...}
+
+  - id: electron-cert-bypass
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: Certificate errors are ignored - any network attacker can impersonate your server.
+    metadata: {tag: electron-cert, cwe: "CWE-295", fix: "Remove it. Use a real certificate on the server (Cloudflare/Let's Encrypt are free)."}
+    pattern-either:
+      - pattern: $APP.commandLine.appendSwitch("ignore-certificate-errors", ...)
+      - pattern: |
+          $APP.on("certificate-error", ($E, $W, $U, $ERR, $CERT, $CB) => { ... $CB(true); ... })
+      - pattern: $S.setCertificateVerifyProc(($R, $CB) => { ... $CB(0); ... })
+
+  - id: electron-open-external
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: shell.openExternal() with a URL that isn't fixed - a link like file:// or a custom protocol can start programs on the PC.
+    metadata: {tag: electron-open-external, cwe: "CWE-939", fix: "Only open https: links: const u = new URL(url); if (u.protocol === 'https:') shell.openExternal(u.href)."}
+    patterns:
+      - pattern: shell.openExternal($U, ...)
+      - pattern-not: shell.openExternal("...", ...)
+      - pattern-not-inside: |
+          if (<... $X.startsWith("https://") ...>) { ... }
+      - pattern-not-inside: |
+          if (<... $X.protocol === "https:" ...>) { ... }
+      - pattern-not-inside: |
+          if (<... $RE.test($U) ...>) { ... }
+      - pattern-not-inside: |
+          if (<... $U.startsWith(...) ...>) { ... }
+      - pattern-not-inside: |
+          if (<... $RE.test($U) ...>) $S;
+      - pattern-not-inside: |
+          if (!<... $RE.test($U) ...>) return ...;
+          ...
+      - pattern-not-inside: |
+          if (!<... $U.startsWith(...) ...>) return ...;
+          ...
+
+  - id: electron-load-http
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: The app window loads a plain http:// page from the internet - anyone on the network can replace it with their own page, which then runs inside your app.
+    metadata: {tag: electron-http, cwe: "CWE-319", fix: "Load https:// only (or bundled files with loadFile)."}
+    patterns:
+      - pattern-either:
+          - pattern: $W.loadURL("$U", ...)
+          - pattern: $W.webContents.loadURL("$U", ...)
+      - metavariable-regex: {metavariable: $U, regex: '^http://(?!localhost|127\.0\.0\.1).*'}
+
+  - id: electron-ipc-passthrough
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: preload exposes ipcRenderer (or a send-any-channel function) to the page - any script in the page can call every IPC handler.
+    metadata: {tag: electron-ipc, cwe: "CWE-749", fix: "Expose one named function per action: contextBridge.exposeInMainWorld('api', { saveFile: (d) => ipcRenderer.invoke('save-file', d) })."}
+    pattern-either:
+      - pattern: |
+          contextBridge.exposeInMainWorld($N, {..., $K: ipcRenderer, ...})
+      - pattern: contextBridge.exposeInMainWorld($N, ipcRenderer)
+      - pattern: |
+          contextBridge.exposeInMainWorld($N, {..., $K: ($CH, ...$ARGS) => ipcRenderer.$F($CH, ...$ARGS), ...})

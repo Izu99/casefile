@@ -1,0 +1,29 @@
+# Not findings: call sites the route map (routes.py) reads to rebuild the Express
+# route table. Semgrep finds them (strings, comments and line breaks handled); the
+# arguments are then read from the source text by offset.
+rules:
+  - id: fact-route
+    languages: [javascript, typescript]
+    severity: INFO
+    message: route
+    patterns:
+      - pattern: $R.$M($PATH, ...)
+      - metavariable-regex: {metavariable: $M, regex: '^(get|post|put|patch|delete|all)$'}
+      - metavariable-pattern:
+          metavariable: $PATH
+          patterns:
+            - pattern-either:
+                - pattern: '"..."'
+                - pattern: "`...`"
+
+  - id: fact-use
+    languages: [javascript, typescript]
+    severity: INFO
+    message: use
+    pattern: $R.use(...)
+
+  - id: fact-chain
+    languages: [javascript, typescript]
+    severity: INFO
+    message: chain
+    pattern: $R.route($PATH).$M(...)

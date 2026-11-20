@@ -1,0 +1,52 @@
+# Flutter / Dart rules (Semgrep supports Dart). Tags -> checklist.py, text -> kb.py.
+rules:
+  - id: dart-bad-certificate
+    languages: [dart]
+    severity: ERROR
+    message: badCertificateCallback returns true - every HTTPS certificate is accepted, so anyone on the network can read and change the traffic.
+    metadata: {tag: tls-bypass, cwe: "CWE-295", fix: "Delete the callback. For a self-signed dev server, only allow it in debug builds and only for that host: (cert, host, port) => kDebugMode && host == 'localhost'."}
+    pattern-either:
+      - pattern: $C.badCertificateCallback = ($A, $B, $D) => true
+      - pattern: |
+          $C.badCertificateCallback = ($A, $B, $D) { return true; }
+      - pattern: |
+          $C..badCertificateCallback = ($A, $B, $D) => true
+
+  - id: dart-http-overrides
+    languages: [dart]
+    severity: WARNING
+    message: HttpOverrides.global is set - this is how apps usually switch off certificate checks for the whole app.
+    metadata: {tag: tls-bypass, cwe: "CWE-295", fix: "Make sure the override's createHttpClient doesn't set badCertificateCallback to accept everything, or remove it from release builds."}
+    pattern: HttpOverrides.global = $X
+
+  - id: dart-token-in-prefs
+    languages: [dart]
+    severity: WARNING
+    message: A login token or secret is stored in SharedPreferences (a plain file).
+    metadata: {tag: token-in-prefs, cwe: "CWE-922", fix: "Store it with flutter_secure_storage (Android Keystore / iOS Keychain / libsecret on Linux)."}
+    patterns:
+      - pattern: $P.setString($KEY, $V)
+      - metavariable-regex: {metavariable: $KEY, regex: '(?i).*(token|jwt|password|passwd|secret|refresh_?token|api_?key|credential|auth_?key|bearer).*'}
+
+  - id: dart-random-token
+    languages: [dart]
+    severity: WARNING
+    message: Random() (not Random.secure()) makes a code or token - it can be predicted.
+    metadata: {tag: dart-random-token, cwe: "CWE-338", fix: "Use Random.secure() for anything that protects access (OTP, tokens, passwords, nonces)."}
+    patterns:
+      - pattern: Random($...A)
+      - pattern-inside: |
+          $T $F(...) { ... }
+      - metavariable-regex: {metavariable: $F, regex: '(?i).*(otp|token|code|pin|secret|password|nonce|salt|key).*'}
+
+  - id: dart-log-secret
+    languages: [dart]
+    severity: INFO
+    message: A token or password is printed to the log - on Android anyone with adb (or some apps) can read it.
+    metadata: {tag: dart-log-secret, cwe: "CWE-532", fix: "Remove the print, or log only that it happened, never the value."}
+    patterns:
+      - pattern-either:
+          - pattern: print($X)
+          - pattern: debugPrint($X)
+          - pattern: log($X, ...)
+      - metavariable-regex: {metavariable: $X, regex: '(?i).*(token|password|passwd|secret|refresh|authorization).*'}

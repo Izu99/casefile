@@ -1,0 +1,16 @@
+const express = require('express');
+const cors = require('cors');
+const session = require('express-session');
+const { protect, requireRole } = require('./middleware/auth');
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '500mb' }));
+app.use(session({ secret: 'keyboard cat', cookie: { secure: false } }));
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/items', require('./routes/items'));
+app.use('/files', express.static('uploads'));
+app.use('/api', protect);
+app.use('/api/invoices', requireRole('owner'), require('./routes/invoices'));
+app.get('/health', (req, res) => res.json({ ok: true }));
+app.listen(3000);
+module.exports = app;

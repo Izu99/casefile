@@ -1,0 +1,329 @@
+# House rules: the mistakes that keep coming back in Express + Mongoose apps.
+# Each rule's metadata.tag ends up as "house:<tag>" on the finding (see checklist.py);
+# longer explanations live in kb.py under the same rule id.
+rules:
+  - id: jwt-no-expiry
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: jwt.sign() without expiresIn - this token works forever if stolen.
+    metadata: {tag: jwt-no-expiry, cwe: "CWE-613", fix: "Pass { expiresIn: '12h' } (or shorter) as the third argument and handle refresh."}
+    patterns:
+      - pattern-either:
+          - pattern: $J.sign($P, $S)
+          - pattern: $J.sign($P, $S, {...})
+      - pattern-not: |
+          $J.sign($P, $S, {..., expiresIn: $E, ...})
+      - metavariable-regex: {metavariable: $J, regex: '^(jwt|jsonwebtoken|JWT)$'}
+
+  - id: fallback-secret
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: A secret falls back to a fixed string when the environment variable is missing - if production ever starts without it, everything is signed with this public value.
+    metadata: {tag: fallback-secret, cwe: "CWE-798", fix: "Fail at startup instead: if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET missing')."}
+    patterns:
+      - pattern-either:
+          - pattern: process.env.$V || "$S"
+          - pattern: process.env.$V ?? "$S"
+      - metavariable-regex: {metavariable: $V, regex: '(?i).*(secret|token|key|password|passwd|salt|private).*'}
+      - metavariable-regex: {metavariable: $S, regex: '.{3,}'}
+
+  - id: bcrypt-low-rounds
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: bcrypt cost is below 10 - leaked hashes crack fast.
+    metadata: {tag: bcrypt-rounds, cwe: "CWE-916", fix: "Use a cost of 10-12: bcrypt.hash(password, 12)."}
+    patterns:
+      - pattern-either:
+          - pattern: $B.hash($X, $N)
+          - pattern: $B.hashSync($X, $N)
+          - pattern: $B.genSalt($N)
+          - pattern: $B.genSaltSync($N)
+      - metavariable-regex: {metavariable: $B, regex: '(?i)^bcrypt(js)?$'}
+      - metavariable-comparison: {metavariable: $N, comparison: $N < 10}
+
+  - id: weak-password-hash
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: MD5/SHA1 used - never acceptable for passwords, and weak for signatures.
+    metadata: {tag: weak-hash, cwe: "CWE-328", fix: "Passwords: bcrypt or argon2. Signatures/integrity: sha256 with HMAC."}
+    pattern-either:
+      - pattern: crypto.createHash("md5")
+      - pattern: crypto.createHash("sha1")
+
+  - id: cors-open
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: CORS allows every website.
+    metadata: {tag: cors, cwe: "CWE-942", fix: "cors({ origin: ['https://your-app.com'], credentials: true }) - list your own sites only."}
+    pattern-either:
+      - pattern: cors()
+      - pattern: |
+          cors({..., origin: "*", ...})
+      - pattern: |
+          cors({..., origin: true, ...})
+      - pattern: |
+          cors({..., origin: ($O, $CB) => $CB(null, true), ...})
+      - pattern: |
+          res.header("Access-Control-Allow-Origin", "*")
+      - pattern: |
+          res.setHeader("Access-Control-Allow-Origin", "*")
+      - pattern: |
+          res.header("Access-Control-Allow-Origin", req.headers.origin)
+      - pattern: |
+          res.setHeader("Access-Control-Allow-Origin", req.headers.origin)
+
+  - id: json-big-limit
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: A request body limit of 100 MB or more.
+    metadata: {tag: body-limit, cwe: "CWE-770", fix: "express.json({ limit: '1mb' }) globally; a bigger limit only on the one route that needs it, after the auth middleware."}
+    patterns:
+      - pattern-either:
+          - pattern: |
+              express.json({..., limit: $L, ...})
+          - pattern: |
+              bodyParser.json({..., limit: $L, ...})
+          - pattern: |
+              express.urlencoded({..., limit: $L, ...})
+      - metavariable-regex: {metavariable: $L, regex: '(?i).*(\d{3,}\s*mb|\d+\s*gb).*'}
+
+  - id: mass-assignment
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: The whole request body is saved - a client can set fields like role, companyId, balance or status.
+    metadata: {tag: mass-assign, cwe: "CWE-915", fix: "Pick the allowed fields: const { name, phone } = req.body; Model.create({ name, phone, companyId: req.user.companyId })."}
+    pattern-either:
+      - pattern: $M.create(req.body)
+      - pattern: new $M(req.body)
+      - pattern: $M.insertMany(req.body)
+      - pattern: $M.findByIdAndUpdate($ID, req.body, ...)
+      - pattern: $M.findOneAndUpdate($F, req.body, ...)
+      - pattern: $M.updateOne($F, req.body, ...)
+      - pattern: $M.updateMany($F, req.body, ...)
+      - pattern: |
+          $M.findByIdAndUpdate($ID, {$set: req.body}, ...)
+      - pattern: |
+          $M.findOneAndUpdate($F, {$set: req.body}, ...)
+      - pattern: Object.assign($DOC, req.body)
+      - pattern: $DOC.set(req.body)
+
+  - id: money-from-client
+    languages: [javascript, typescript]
+    severity: INFO
+    message: A money field is saved straight from the request - check the server recomputes it (prices from the database, totals on the server).
+    metadata: {tag: money-from-client, cwe: "CWE-840", fix: "Read prices from the database and compute totals on the server; accept only ids and quantities (validated positive) from the client."}
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $M.create({..., $K: req.body.$F, ...})
+          - pattern: |
+              new $M({..., $K: req.body.$F, ...})
+          - pattern: |
+              $M.findByIdAndUpdate($I, {..., $K: req.body.$F, ...}, ...)
+          - pattern: |
+              $M.updateOne($Q, {..., $K: req.body.$F, ...}, ...)
+          - pattern: |
+              {$set: {..., $K: req.body.$F, ...}}
+      - metavariable-regex: {metavariable: $F, regex: '(?i)^(price|unitPrice|total|subTotal|grandTotal|netTotal|amount|discount|paid|paidAmount|balance|creditLimit|cost|tax|commission|salary)$'}
+
+  - id: role-from-client
+    languages: [javascript, typescript]
+    severity: INFO
+    message: A role or permission is taken from the request - check the caller may only give roles below their own.
+    metadata: {tag: role-from-client, cwe: "CWE-269", fix: "Keep an allow-list of roles the caller may assign (strictly below their own) and reject anything else."}
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $M.create({..., $K: req.body.$F, ...})
+          - pattern: |
+              new $M({..., $K: req.body.$F, ...})
+          - pattern: |
+              $M.findByIdAndUpdate($I, {..., $K: req.body.$F, ...}, ...)
+          - pattern: |
+              $M.updateOne($Q, {..., $K: req.body.$F, ...}, ...)
+          - pattern: |
+              $DOC.$F = req.body.$F
+      - metavariable-regex: {metavariable: $F, regex: '(?i)^(role|roles|isAdmin|admin|permissions|isSuperAdmin|userType|accessLevel)$'}
+
+  - id: idor-candidate
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: A record is loaded by the id in the URL alone - make sure it also checks the record belongs to the caller's company.
+    metadata: {tag: idor-candidate, cwe: "CWE-639", fix: "Model.findOne({ _id: req.params.id, companyId: req.user.companyId }) - and return 404 when it's missing."}
+    pattern-either:
+      - pattern: $M.findById(req.params.$ID, ...)
+      - pattern: $M.findByIdAndUpdate(req.params.$ID, ...)
+      - pattern: $M.findByIdAndDelete(req.params.$ID, ...)
+      - pattern: $M.findByIdAndRemove(req.params.$ID, ...)
+      - pattern: |
+          $M.deleteOne({_id: req.params.$ID})
+      - pattern: |
+          $M.findOne({_id: req.params.$ID})
+
+  - id: regex-from-input
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: User input goes straight into a regex - ReDoS and regex injection (".*" matches everything).
+    metadata: {tag: regex-from-input, cwe: "CWE-1333", fix: "Escape it first (escapeRegex(q)) and cap its length."}
+    pattern-either:
+      - pattern: new RegExp(req.$A.$B, ...)
+      - pattern: new RegExp(req.$A, ...)
+      - pattern: |
+          {$regex: req.$A.$B, ...}
+
+  - id: mongo-where
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: $where runs JavaScript inside MongoDB.
+    metadata: {tag: where, cwe: "CWE-943", fix: "Rewrite with normal query operators; never use $where."}
+    pattern-either:
+      - pattern: |
+          {$where: $X}
+      - pattern: $M.$where(...)
+
+  - id: math-random-token
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: Math.random() makes a code or token - it is predictable.
+    metadata: {tag: math-random-token, cwe: "CWE-338", fix: "crypto.randomInt(100000, 1000000) for OTPs, crypto.randomBytes(32).toString('hex') for tokens."}
+    patterns:
+      - pattern-either:
+          - pattern: Math.random().toString(...)
+          - pattern: Math.floor(Math.random() * $N)
+          - pattern: Math.random() * $N
+      - pattern-either:
+          - pattern-inside: |
+              function $F(...) { ... }
+          - pattern-inside: |
+              $F = (...) => { ... }
+          - pattern-inside: |
+              $F = (...) => $E
+      - metavariable-regex: {metavariable: $F, regex: '(?i).*(otp|token|code|pin|secret|reset|password|nonce|salt|invite|verif).*'}
+
+  - id: stack-in-response
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: A stack trace is sent to the client.
+    metadata: {tag: stack-leak, cwe: "CWE-209", fix: "Log err.stack on the server; send only a short message."}
+    pattern-either:
+      - pattern: |
+          res.$F({..., stack: $E.stack, ...})
+      - pattern: res.$F($E.stack)
+      - pattern: |
+          res.status($C).$F({..., stack: $E.stack, ...})
+
+  - id: async-no-catch
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: An async route handler with no try/catch and no asyncHandler - on Express 4 a thrown error leaves the request hanging.
+    metadata: {tag: async-no-catch, cwe: "CWE-755", fix: "Wrap it: router.get('/', asyncHandler(async (req, res) => {...})) - or install express-async-errors once in app.js."}
+    patterns:
+      - pattern-either:
+          - pattern: $R.$M($P, ..., async ($REQ, $RES) => { ... })
+          - pattern: $R.$M($P, ..., async ($REQ, $RES, $NEXT) => { ... })
+          - pattern: $R.$M($P, ..., async function ($REQ, $RES, ...) { ... })
+          - pattern: exports.$H = async ($REQ, $RES) => { ... }
+          - pattern: exports.$H = async ($REQ, $RES, $NEXT) => { ... }
+          - pattern: module.exports.$H = async ($REQ, $RES) => { ... }
+          - pattern: exports.$H = async function ($REQ, $RES, ...) { ... }
+      - pattern-not: $R.$M($P, ..., async ($REQ, $RES, ...) => { ... try { ... } catch ($E) { ... } ... })
+      - pattern-not: $R.$M($P, ..., async function ($REQ, $RES, ...) { ... try { ... } catch ($E) { ... } ... })
+      - pattern-not: exports.$H = async ($REQ, $RES, ...) => { ... try { ... } catch ($E) { ... } ... }
+      - pattern-not: module.exports.$H = async ($REQ, $RES, ...) => { ... try { ... } catch ($E) { ... } ... }
+      - pattern-not: exports.$H = async function ($REQ, $RES, ...) { ... try { ... } catch ($E) { ... } ... }
+      - metavariable-regex: {metavariable: $REQ, regex: '^_?(req|request)$'}
+
+  - id: count-plus-one
+    languages: [javascript, typescript]
+    severity: INFO
+    message: A document number made from count + 1 - two saves at the same moment get the same number.
+    metadata: {tag: count-plus-one, cwe: "CWE-362", fix: "Use an atomic counter: Counter.findOneAndUpdate({ name }, { $inc: { seq: 1 } }, { new: true, upsert: true }) - plus a unique index on the number."}
+    pattern-either:
+      - pattern: (await $M.countDocuments(...)) + 1
+      - pattern: (await $M.count(...)) + 1
+      - pattern: $M.countDocuments(...) + 1
+      - pattern: |
+          $C = await $M.countDocuments(...);
+          ...
+          $C + 1
+
+  - id: log-request-body
+    languages: [javascript, typescript]
+    severity: INFO
+    message: The whole request body is logged - passwords and tokens end up in log files.
+    metadata: {tag: log-body, cwe: "CWE-532", fix: "Log only the fields you need, never password/token/otp."}
+    pattern-either:
+      - pattern: console.log(..., req.body, ...)
+      - pattern: logger.$L(..., req.body, ...)
+
+  - id: multer-no-filter
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: multer upload without fileFilter or size limit.
+    metadata: {tag: upload-filter, cwe: "CWE-434", fix: "Add fileFilter (allow-list of mimetypes/extensions) and limits: { fileSize: 5 * 1024 * 1024 }."}
+    patterns:
+      - pattern: multer({...})
+      - pattern-not: |
+          multer({..., fileFilter: $F, ...})
+
+  - id: tls-reject-unauthorized
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: HTTPS certificate checking is switched off.
+    metadata: {tag: tls-bypass, cwe: "CWE-295", fix: "Remove rejectUnauthorized:false / NODE_TLS_REJECT_UNAUTHORIZED=0. For a self-signed internal server, pass its CA with the `ca` option instead."}
+    pattern-either:
+      - pattern: |
+          {..., rejectUnauthorized: false, ...}
+      - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+      - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = 0
+
+  - id: session-cookie-insecure
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: Session cookie options are unsafe (secure or httpOnly switched off).
+    metadata: {tag: session-cookie, cwe: "CWE-614", fix: "cookie: { secure: true, httpOnly: true, sameSite: 'lax' } - and app.set('trust proxy', 1) behind nginx."}
+    pattern-either:
+      - pattern: |
+          session({..., cookie: {..., secure: false, ...}, ...})
+      - pattern: |
+          session({..., cookie: {..., httpOnly: false, ...}, ...})
+      - pattern: |
+          session({..., secret: "$S", ...})
+
+  - id: cookie-without-flags
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: A login/session cookie is set without httpOnly or secure.
+    metadata: {tag: cookie-flags, cwe: "CWE-1004", fix: "res.cookie(name, value, { httpOnly: true, secure: true, sameSite: 'lax' })."}
+    patterns:
+      - pattern-either:
+          - pattern: res.cookie("$N", $V)
+          - pattern: |
+              res.cookie("$N", $V, {...})
+      - pattern-not: |
+          res.cookie("$N", $V, {..., httpOnly: true, ..., secure: $S, ...})
+      - pattern-not: |
+          res.cookie("$N", $V, {..., secure: $S, ..., httpOnly: true, ...})
+      - metavariable-regex: {metavariable: $N, regex: '(?i).*(token|session|auth|jwt|sid|refresh).*'}
+
+  - id: listen-all-interfaces
+    languages: [javascript, typescript]
+    severity: INFO
+    message: The API listens on every network interface - on a VPS behind nginx it should listen on 127.0.0.1 only.
+    metadata: {tag: listen-all, cwe: "CWE-668", fix: "app.listen(PORT, '127.0.0.1') - nginx still reaches it; the internet can't skip nginx."}
+    patterns:
+      - pattern-either:
+          - pattern: $APP.listen($PORT)
+          - pattern: $APP.listen($PORT, () => { ... })
+          - pattern: $APP.listen($PORT, function () { ... })
+          - pattern: $APP.listen($PORT, "0.0.0.0", ...)
+      - metavariable-regex: {metavariable: $APP, regex: '(?i)^(app|server|httpServer|http_server)$'}
+
+  - id: next-public-secret
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: A NEXT_PUBLIC_ variable with a secret-sounding name - NEXT_PUBLIC_ values are copied into every visitor's browser.
+    metadata: {tag: next-public-secret, cwe: "CWE-312", fix: "Rename it without NEXT_PUBLIC_ and use it only in server code (route handlers, server actions)."}
+    patterns:
+      - pattern: process.env.$V
+      - metavariable-regex: {metavariable: $V, regex: '^NEXT_PUBLIC_.*(?i:secret|private|password|service_role|server_key|admin).*'}
